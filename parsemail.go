@@ -85,10 +85,7 @@ func createEmailFromHeader(header mail.Header) (email Email, err error) {
 
 	//decode whole header for easier access to extra fields
 	//todo: should we decode? aren't only standard fields mime encoded?
-	email.Header, err = decodeHeaderMime(header)
-	if err != nil {
-		return
-	}
+	email.Header = decodeHeaderMime(header)
 
 	return
 }
@@ -291,7 +288,7 @@ func decodeMimeSentence(s string) string {
 	return strings.Join(result, "")
 }
 
-func decodeHeaderMime(header mail.Header) (mail.Header, error) {
+func decodeHeaderMime(header mail.Header) mail.Header {
 	parsedHeader := map[string][]string{}
 
 	for headerName, headerData := range header {
@@ -304,7 +301,7 @@ func decodeHeaderMime(header mail.Header) (mail.Header, error) {
 		parsedHeader[headerName] = parsedHeaderData
 	}
 
-	return mail.Header(parsedHeader), nil
+	return mail.Header(parsedHeader)
 }
 
 func isEmbeddedFile(part *multipart.Part) bool {
@@ -372,7 +369,7 @@ type headerParser struct {
 	err    error
 }
 
-func (hp headerParser) parseAddress(s string) (ma *mail.Address) {
+func (hp *headerParser) parseAddress(s string) (ma *mail.Address) {
 	if hp.err != nil {
 		return nil
 	}
@@ -386,7 +383,7 @@ func (hp headerParser) parseAddress(s string) (ma *mail.Address) {
 	return nil
 }
 
-func (hp headerParser) parseAddressList(s string) (ma []*mail.Address) {
+func (hp *headerParser) parseAddressList(s string) (ma []*mail.Address) {
 	if hp.err != nil {
 		return
 	}
@@ -399,7 +396,7 @@ func (hp headerParser) parseAddressList(s string) (ma []*mail.Address) {
 	return
 }
 
-func (hp headerParser) parseTime(s string) (t time.Time) {
+func (hp *headerParser) parseTime(s string) (t time.Time) {
 	if hp.err != nil || s == "" {
 		return
 	}
@@ -421,7 +418,7 @@ func (hp headerParser) parseTime(s string) (t time.Time) {
 	return
 }
 
-func (hp headerParser) parseMessageId(s string) string {
+func (hp *headerParser) parseMessageId(s string) string {
 	if hp.err != nil {
 		return ""
 	}
@@ -429,7 +426,7 @@ func (hp headerParser) parseMessageId(s string) string {
 	return strings.Trim(s, "<> ")
 }
 
-func (hp headerParser) parseMessageIdList(s string) (result []string) {
+func (hp *headerParser) parseMessageIdList(s string) (result []string) {
 	if hp.err != nil {
 		return
 	}
