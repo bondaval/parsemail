@@ -252,15 +252,23 @@ func parseMultipartMixed(msg io.Reader, boundary string) (textBody, htmlBody str
 			}
 
 			htmlBody += strings.TrimSuffix(string(ppContent[:]), "\n")
-		} else if isAttachment(part) {
-			at, err := decodeAttachment(part)
+		} else {
+			ok, err := isAttachment(part)
+
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 
-			attachments = append(attachments, at)
-		} else {
-			return textBody, htmlBody, attachments, embeddedFiles, fmt.Errorf("Unknown multipart/mixed nested mime type: %s", contentType)
+			if ok {
+				at, err := decodeAttachment(part)
+				if err != nil {
+					return textBody, htmlBody, attachments, embeddedFiles, err
+				}
+
+				attachments = append(attachments, at)
+			} else {
+				return textBody, htmlBody, attachments, embeddedFiles, fmt.Errorf("Unknown multipart/mixed nested mime type: %s", contentType)
+			}
 		}
 	}
 
@@ -322,12 +330,40 @@ func decodeEmbeddedFile(part *multipart.Part) (ef EmbeddedFile, err error) {
 	return
 }
 
-func isAttachment(part *multipart.Part) bool {
-	return part.FileName() != ""
+func getPartFilename(part *multipart.Part) (string, error) {
+	if part.FileName() != "" {
+		return part.FileName(), nil
+	}
+
+	contentType := part.Header.Get("Content-Type")
+
+	_, attributes, err := mime.ParseMediaType(contentType)
+
+	if err != nil {
+		return "", fmt.Errorf("parsing content type header. %s", err)
+	}
+
+	return attributes["name"], nil
+}
+
+func isAttachment(part *multipart.Part) (bool, error) {
+	filename, err := getPartFilename(part)
+
+	if err != nil {
+		return false, err
+	}
+
+	return filename != "", nil
 }
 
 func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
-	filename := decodeMimeSentence(part.FileName())
+	partFilename, err := getPartFilename(part)
+
+	if err != nil {
+		return
+	}
+
+	filename := decodeMimeSentence(partFilename)
 	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
 	if err != nil {
 		return
