@@ -1,0 +1,19 @@
+name: Build Branch
+
+on:
+  push:
+    branches-ignore:
+      - 'main'
+
+jobs:
+  lint:
+    uses: bondaval/.github/.github/workflows/go_lint.yml@main
+    secrets: inherit
+
+  audit:
+    uses: bondaval/.github/.github/workflows/go_audit.yml@main
+    secrets: inherit
+
+  test:
+    uses: bondaval/.github/.github/workflows/go_test.yml@main
+    secrets: inherit
