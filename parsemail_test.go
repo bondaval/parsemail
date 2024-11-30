@@ -404,6 +404,33 @@ So, "Hello".`,
 			htmlBody:  "<div dir=\"ltr\"><div>Time for the egg.</div><div><br></div><div><br><br></div></div>",
 			textBody:  "Time for the egg.",
 		},
+		14: {
+			contentType: "multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf",
+			mailData:    attchmentContentDispositionNoFilename,
+			subject:     "Peter Foobar",
+			from: []mail.Address{
+				{
+					Name:    "Peter Foobar",
+					Address: "peter.foobar@gmail.com",
+				},
+			},
+			to: []mail.Address{
+				{
+					Name:    "",
+					Address: "dusan@kasan.sk",
+				},
+			},
+			messageID: "CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com",
+			date:      parseDate("Tue, 02 Apr 2019 11:12:26 +0000"),
+			htmlBody:  "<div dir=\"ltr\"><br></div>",
+			attachments: []attachmentData{
+				{
+					filename:    "unencoded.csv",
+					contentType: "application/csv",
+					data:        fmt.Sprintf("\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n", "Some", "Data", "In", "Csv", "Format", "Foo", "Bar", "Baz", "Bum", "Poo"),
+				},
+			},
+		},
 	}
 
 	for index, td := range testData {
@@ -941,6 +968,38 @@ Content-Transfer-Encoding: 7bit
 Content-Disposition: attachment; 
 	filename="unencoded.csv"
 
+
+"Some", "Data", "In", "Csv", "Format"
+"Foo", "Bar", "Baz", "Bum", "Poo"
+
+--f403045f1dcc043a44054c8e6bbf--
+`
+var attchmentContentDispositionNoFilename = `From: =?UTF-8?Q?Peter_Foobar?= <peter.foobar@gmail.com>
+Date: Tue, 2 Apr 2019 11:12:26 +0000
+Message-ID: <CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com>
+Subject: =?UTF-8?Q?Peter_Foobar?=
+To: dusan@kasan.sk
+Content-Type: multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf
+
+--f403045f1dcc043a44054c8e6bbf
+Content-Type: multipart/alternative; boundary=f403045f1dcc043a3f054c8e6bbd
+
+--f403045f1dcc043a3f054c8e6bbd
+Content-Type: text/plain; charset=UTF-8
+
+
+
+--f403045f1dcc043a3f054c8e6bbd
+Content-Type: text/html; charset=UTF-8
+
+<div dir="ltr"><br></div>
+
+--f403045f1dcc043a3f054c8e6bbd--
+--f403045f1dcc043a44054c8e6bbf
+Content-Type: application/csv; 
+	name="unencoded.csv"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment
 
 "Some", "Data", "In", "Csv", "Format"
 "Foo", "Bar", "Baz", "Bum", "Poo"
