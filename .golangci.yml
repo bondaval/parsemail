@@ -1,0 +1,33 @@
+run:
+  # Lint tests files too
+  tests: true
+
+output:
+  # If multiple errors for same line, show all
+  uniq-by-line: false
+  # Makes results easier to read
+  sort-results: true
+  print-linter-name: true
+
+  formats:
+      - format: colored-line-number
+        path: stdout
+
+issues:
+  # Do not limit the number of errors to show per linter
+  max-issues-per-linter: 0
+  # Do not limit the number of errors of the same type to show
+  max-same-issues: 0
+
+linters:
+  # These are applied on top of those enabled by default
+  enable:
+    - gofmt
+    # report unused function parameters
+    - unparam
+    # Dont allow replace directives (ok to use for local development only)
+    - gomoddirectives
+    # remove unneeded type conversions
+    - unconvert
+    # find places where we can use std lib variables
+    - usestdlibvars

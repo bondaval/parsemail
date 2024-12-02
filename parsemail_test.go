@@ -3,7 +3,8 @@ package parsemail
 import (
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
+	"io"
+
 	"net/mail"
 	"strings"
 	"testing"
@@ -372,15 +373,15 @@ So, "Hello".`,
 			htmlBody:  "<div dir=\"ltr\"><br></div>",
 			attachments: []attachmentData{
 				{
-					filename:      "unencoded.csv",
-					contentType:   "application/csv",
-					data: fmt.Sprintf("\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n", "Some", "Data", "In", "Csv", "Format", "Foo", "Bar", "Baz", "Bum", "Poo"),
+					filename:    "unencoded.csv",
+					contentType: "application/csv",
+					data:        fmt.Sprintf("\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n", "Some", "Data", "In", "Csv", "Format", "Foo", "Bar", "Baz", "Bum", "Poo"),
 				},
 			},
 		},
 		13: {
 			contentType: "multipart/related; boundary=\"000000000000ab2e2205a26de587\"",
-			mailData:   multipartRelatedExample,
+			mailData:    multipartRelatedExample,
 			subject:     "Saying Hello",
 			from: []mail.Address{
 				{
@@ -389,7 +390,7 @@ So, "Hello".`,
 				},
 			},
 			sender: mail.Address{
-				Name: "Michael Jones",
+				Name:    "Michael Jones",
 				Address: "mjones@machine.example",
 			},
 			to: []mail.Address{
@@ -401,187 +402,216 @@ So, "Hello".`,
 			messageID: "1234@local.machine.example",
 			date:      parseDate("Fri, 21 Nov 1997 09:55:06 -0600"),
 			htmlBody:  "<div dir=\"ltr\"><div>Time for the egg.</div><div><br></div><div><br><br></div></div>",
-			textBody: "Time for the egg.",
+			textBody:  "Time for the egg.",
+		},
+		14: {
+			contentType: "multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf",
+			mailData:    attchmentContentDispositionNoFilename,
+			subject:     "Peter Foobar",
+			from: []mail.Address{
+				{
+					Name:    "Peter Foobar",
+					Address: "peter.foobar@gmail.com",
+				},
+			},
+			to: []mail.Address{
+				{
+					Name:    "",
+					Address: "dusan@kasan.sk",
+				},
+			},
+			messageID: "CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com",
+			date:      parseDate("Tue, 02 Apr 2019 11:12:26 +0000"),
+			htmlBody:  "<div dir=\"ltr\"><br></div>",
+			attachments: []attachmentData{
+				{
+					filename:    "unencoded.csv",
+					contentType: "application/csv",
+					data:        fmt.Sprintf("\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n"+`"%s", "%s", "%s", "%s", "%s"`+"\n", "Some", "Data", "In", "Csv", "Format", "Foo", "Bar", "Baz", "Bum", "Poo"),
+				},
+			},
 		},
 	}
 
 	for index, td := range testData {
-		e, err := Parse(strings.NewReader(td.mailData))
-		if err != nil {
-			t.Error(err)
-		}
-
-		if td.contentType != e.ContentType {
-			t.Errorf("[Test Case %v] Wrong content type. Expected: %s, Got: %s", index, td.contentType, e.ContentType)
-		}
-
-		if td.content != "" {
-			b, err := ioutil.ReadAll(e.Content)
+		t.Run(fmt.Sprintf("%v", index), func(t *testing.T) {
+			e, err := Parse(strings.NewReader(td.mailData))
 			if err != nil {
 				t.Error(err)
-			} else if td.content != string(b) {
-				t.Errorf("[Test Case %v] Wrong content. Expected: %s, Got: %s", index, td.content, string(b))
 			}
-		}
 
-		if td.subject != e.Subject {
-			t.Errorf("[Test Case %v] Wrong subject. Expected: %s, Got: %s", index, td.subject, e.Subject)
-		}
+			if td.contentType != e.ContentType {
+				t.Errorf("[Test Case %v] Wrong content type. Expected: %s, Got: %s", index, td.contentType, e.ContentType)
+			}
 
-		if td.messageID != e.MessageID {
-			t.Errorf("[Test Case %v] Wrong messageID. Expected: '%s', Got: '%s'", index, td.messageID, e.MessageID)
-		}
-
-		if !td.date.Equal(e.Date) {
-			t.Errorf("[Test Case %v] Wrong date. Expected: %v, Got: %v", index, td.date, e.Date)
-		}
-
-		d := dereferenceAddressList(e.From)
-		if !assertAddressListEq(td.from, d) {
-			t.Errorf("[Test Case %v] Wrong from. Expected: %s, Got: %s", index, td.from, d)
-		}
-
-		var sender mail.Address
-		if e.Sender != nil {
-			sender = *e.Sender
-		}
-		if td.sender != sender {
-			t.Errorf("[Test Case %v] Wrong sender. Expected: %s, Got: %s", index, td.sender, sender)
-		}
-
-		d = dereferenceAddressList(e.To)
-		if !assertAddressListEq(td.to, d) {
-			t.Errorf("[Test Case %v] Wrong to. Expected: %s, Got: %s", index, td.to, d)
-		}
-
-		d = dereferenceAddressList(e.Cc)
-		if !assertAddressListEq(td.cc, d) {
-			t.Errorf("[Test Case %v] Wrong cc. Expected: %s, Got: %s", index, td.cc, d)
-		}
-
-		d = dereferenceAddressList(e.Bcc)
-		if !assertAddressListEq(td.bcc, d) {
-			t.Errorf("[Test Case %v] Wrong bcc. Expected: %s, Got: %s", index, td.bcc, d)
-		}
-
-		if td.resentMessageID != e.ResentMessageID {
-			t.Errorf("[Test Case %v] Wrong resent messageID. Expected: '%s', Got: '%s'", index, td.resentMessageID, e.ResentMessageID)
-		}
-
-		if !td.resentDate.Equal(e.ResentDate) && !td.resentDate.IsZero() && !e.ResentDate.IsZero() {
-			t.Errorf("[Test Case %v] Wrong resent date. Expected: %v, Got: %v", index, td.resentDate, e.ResentDate)
-		}
-
-		d = dereferenceAddressList(e.ResentFrom)
-		if !assertAddressListEq(td.resentFrom, d) {
-			t.Errorf("[Test Case %v] Wrong resent from. Expected: %s, Got: %s", index, td.resentFrom, d)
-		}
-
-		var resentSender mail.Address
-		if e.ResentSender != nil {
-			resentSender = *e.ResentSender
-		}
-		if td.resentSender != resentSender {
-			t.Errorf("[Test Case %v] Wrong resent sender. Expected: %s, Got: %s", index, td.resentSender, resentSender)
-		}
-
-		d = dereferenceAddressList(e.ResentTo)
-		if !assertAddressListEq(td.resentTo, d) {
-			t.Errorf("[Test Case %v] Wrong resent to. Expected: %s, Got: %s", index, td.resentTo, d)
-		}
-
-		d = dereferenceAddressList(e.ResentCc)
-		if !assertAddressListEq(td.resentCc, d) {
-			t.Errorf("[Test Case %v] Wrong resent cc. Expected: %s, Got: %s", index, td.resentCc, d)
-		}
-
-		d = dereferenceAddressList(e.ResentBcc)
-		if !assertAddressListEq(td.resentBcc, d) {
-			t.Errorf("[Test Case %v] Wrong resent bcc. Expected: %s, Got: %s", index, td.resentBcc, d)
-		}
-
-		if !assertSliceEq(td.inReplyTo, e.InReplyTo) {
-			t.Errorf("[Test Case %v] Wrong in reply to. Expected: %s, Got: %s", index, td.inReplyTo, e.InReplyTo)
-		}
-
-		if !assertSliceEq(td.references, e.References) {
-			t.Errorf("[Test Case %v] Wrong references. Expected: %s, Got: %s", index, td.references, e.References)
-		}
-
-		d = dereferenceAddressList(e.ReplyTo)
-		if !assertAddressListEq(td.replyTo, d) {
-			t.Errorf("[Test Case %v] Wrong reply to. Expected: %s, Got: %s", index, td.replyTo, d)
-		}
-
-		if td.htmlBody != e.HTMLBody {
-			t.Errorf("[Test Case %v] Wrong html body. Expected: '%s', Got: '%s'", index, td.htmlBody, e.HTMLBody)
-		}
-
-		if td.textBody != e.TextBody {
-			t.Errorf("[Test Case %v] Wrong text body. Expected: '%s', Got: '%s'", index, td.textBody, e.TextBody)
-		}
-
-		if len(td.attachments) != len(e.Attachments) {
-			t.Errorf("[Test Case %v] Incorrect number of attachments! Expected: %v, Got: %v.", index, len(td.attachments), len(e.Attachments))
-		} else {
-			attachs := e.Attachments[:]
-
-			for _, ad := range td.attachments {
-				found := false
-
-				for i, ra := range attachs {
-					b, err := ioutil.ReadAll(ra.Data)
-					if err != nil {
-						t.Error(err)
-					}
-
-					if ra.Filename == ad.filename && string(b) == ad.data && ra.ContentType == ad.contentType {
-						found = true
-						attachs = append(attachs[:i], attachs[i+1:]...)
-					}
-				}
-
-				if !found {
-					t.Errorf("[Test Case %v] Attachment not found: %s", index, ad.filename)
+			if td.content != "" {
+				b, err := io.ReadAll(e.Content)
+				if err != nil {
+					t.Error(err)
+				} else if td.content != string(b) {
+					t.Errorf("[Test Case %v] Wrong content. Expected: %s, Got: %s", index, td.content, string(b))
 				}
 			}
 
-			if len(attachs) != 0 {
-				t.Errorf("[Test Case %v] Email contains %v unexpected attachments: %v", index, len(attachs), attachs)
+			if td.subject != e.Subject {
+				t.Errorf("[Test Case %v] Wrong subject. Expected: %s, Got: %s", index, td.subject, e.Subject)
 			}
-		}
 
-		if len(td.embeddedFiles) != len(e.EmbeddedFiles) {
-			t.Errorf("[Test Case %v] Incorrect number of embedded files! Expected: %v, Got: %v.", index, len(td.embeddedFiles), len(e.EmbeddedFiles))
-		} else {
-			embeds := e.EmbeddedFiles[:]
+			if td.messageID != e.MessageID {
+				t.Errorf("[Test Case %v] Wrong messageID. Expected: '%s', Got: '%s'", index, td.messageID, e.MessageID)
+			}
 
-			for _, ad := range td.embeddedFiles {
-				found := false
+			if !td.date.Equal(e.Date) {
+				t.Errorf("[Test Case %v] Wrong date. Expected: %v, Got: %v", index, td.date, e.Date)
+			}
 
-				for i, ra := range embeds {
-					b, err := ioutil.ReadAll(ra.Data)
-					if err != nil {
-						t.Error(err)
+			d := dereferenceAddressList(e.From)
+			if !assertAddressListEq(td.from, d) {
+				t.Errorf("[Test Case %v] Wrong from. Expected: %s, Got: %s", index, td.from, d)
+			}
+
+			var sender mail.Address
+			if e.Sender != nil {
+				sender = *e.Sender
+			}
+			if td.sender != sender {
+				t.Errorf("[Test Case %v] Wrong sender. Expected: %s, Got: %s", index, td.sender, sender)
+			}
+
+			d = dereferenceAddressList(e.To)
+			if !assertAddressListEq(td.to, d) {
+				t.Errorf("[Test Case %v] Wrong to. Expected: %s, Got: %s", index, td.to, d)
+			}
+
+			d = dereferenceAddressList(e.Cc)
+			if !assertAddressListEq(td.cc, d) {
+				t.Errorf("[Test Case %v] Wrong cc. Expected: %s, Got: %s", index, td.cc, d)
+			}
+
+			d = dereferenceAddressList(e.Bcc)
+			if !assertAddressListEq(td.bcc, d) {
+				t.Errorf("[Test Case %v] Wrong bcc. Expected: %s, Got: %s", index, td.bcc, d)
+			}
+
+			if td.resentMessageID != e.ResentMessageID {
+				t.Errorf("[Test Case %v] Wrong resent messageID. Expected: '%s', Got: '%s'", index, td.resentMessageID, e.ResentMessageID)
+			}
+
+			if !td.resentDate.Equal(e.ResentDate) && !td.resentDate.IsZero() && !e.ResentDate.IsZero() {
+				t.Errorf("[Test Case %v] Wrong resent date. Expected: %v, Got: %v", index, td.resentDate, e.ResentDate)
+			}
+
+			d = dereferenceAddressList(e.ResentFrom)
+			if !assertAddressListEq(td.resentFrom, d) {
+				t.Errorf("[Test Case %v] Wrong resent from. Expected: %s, Got: %s", index, td.resentFrom, d)
+			}
+
+			var resentSender mail.Address
+			if e.ResentSender != nil {
+				resentSender = *e.ResentSender
+			}
+			if td.resentSender != resentSender {
+				t.Errorf("[Test Case %v] Wrong resent sender. Expected: %s, Got: %s", index, td.resentSender, resentSender)
+			}
+
+			d = dereferenceAddressList(e.ResentTo)
+			if !assertAddressListEq(td.resentTo, d) {
+				t.Errorf("[Test Case %v] Wrong resent to. Expected: %s, Got: %s", index, td.resentTo, d)
+			}
+
+			d = dereferenceAddressList(e.ResentCc)
+			if !assertAddressListEq(td.resentCc, d) {
+				t.Errorf("[Test Case %v] Wrong resent cc. Expected: %s, Got: %s", index, td.resentCc, d)
+			}
+
+			d = dereferenceAddressList(e.ResentBcc)
+			if !assertAddressListEq(td.resentBcc, d) {
+				t.Errorf("[Test Case %v] Wrong resent bcc. Expected: %s, Got: %s", index, td.resentBcc, d)
+			}
+
+			if !assertSliceEq(td.inReplyTo, e.InReplyTo) {
+				t.Errorf("[Test Case %v] Wrong in reply to. Expected: %s, Got: %s", index, td.inReplyTo, e.InReplyTo)
+			}
+
+			if !assertSliceEq(td.references, e.References) {
+				t.Errorf("[Test Case %v] Wrong references. Expected: %s, Got: %s", index, td.references, e.References)
+			}
+
+			d = dereferenceAddressList(e.ReplyTo)
+			if !assertAddressListEq(td.replyTo, d) {
+				t.Errorf("[Test Case %v] Wrong reply to. Expected: %s, Got: %s", index, td.replyTo, d)
+			}
+
+			if td.htmlBody != e.HTMLBody {
+				t.Errorf("[Test Case %v] Wrong html body. Expected: '%s', Got: '%s'", index, td.htmlBody, e.HTMLBody)
+			}
+
+			if td.textBody != e.TextBody {
+				t.Errorf("[Test Case %v] Wrong text body. Expected: '%s', Got: '%s'", index, td.textBody, e.TextBody)
+			}
+
+			if len(td.attachments) != len(e.Attachments) {
+				t.Errorf("[Test Case %v] Incorrect number of attachments! Expected: %v, Got: %v.", index, len(td.attachments), len(e.Attachments))
+			} else {
+				attachs := e.Attachments[:]
+
+				for _, ad := range td.attachments {
+					found := false
+
+					for i, ra := range attachs {
+						b, err := io.ReadAll(ra.Data)
+						if err != nil {
+							t.Error(err)
+						}
+
+						if ra.Filename == ad.filename && string(b) == ad.data && ra.ContentType == ad.contentType {
+							found = true
+							attachs = append(attachs[:i], attachs[i+1:]...)
+						}
 					}
 
-					encoded := base64.StdEncoding.EncodeToString(b)
-
-					if ra.CID == ad.cid && encoded == ad.base64data && ra.ContentType == ad.contentType {
-						found = true
-						embeds = append(embeds[:i], embeds[i+1:]...)
+					if !found {
+						t.Errorf("[Test Case %v] Attachment not found: %s", index, ad.filename)
 					}
 				}
 
-				if !found {
-					t.Errorf("[Test Case %v] Embedded file not found: %s", index, ad.cid)
+				if len(attachs) != 0 {
+					t.Errorf("[Test Case %v] Email contains %v unexpected attachments: %v", index, len(attachs), attachs)
 				}
 			}
 
-			if len(embeds) != 0 {
-				t.Errorf("[Test Case %v] Email contains %v unexpected embedded files: %v", index, len(embeds), embeds)
+			if len(td.embeddedFiles) != len(e.EmbeddedFiles) {
+				t.Errorf("[Test Case %v] Incorrect number of embedded files! Expected: %v, Got: %v.", index, len(td.embeddedFiles), len(e.EmbeddedFiles))
+			} else {
+				embeds := e.EmbeddedFiles[:]
+
+				for _, ad := range td.embeddedFiles {
+					found := false
+
+					for i, ra := range embeds {
+						b, err := io.ReadAll(ra.Data)
+						if err != nil {
+							t.Error(err)
+						}
+
+						encoded := base64.StdEncoding.EncodeToString(b)
+
+						if ra.CID == ad.cid && encoded == ad.base64data && ra.ContentType == ad.contentType {
+							found = true
+							embeds = append(embeds[:i], embeds[i+1:]...)
+						}
+					}
+
+					if !found {
+						t.Errorf("[Test Case %v] Embedded file not found: %s", index, ad.cid)
+					}
+				}
+
+				if len(embeds) != 0 {
+					t.Errorf("[Test Case %v] Email contains %v unexpected embedded files: %v", index, len(embeds), embeds)
+				}
 			}
-		}
+		})
 	}
 }
 
@@ -595,9 +625,9 @@ func parseDate(in string) time.Time {
 }
 
 type attachmentData struct {
-	filename      string
-	contentType   string
-	data          string
+	filename    string
+	contentType string
+	data        string
 }
 
 type embeddedFileData struct {
@@ -806,8 +836,8 @@ Message-ID: <5678.21-Nov-1997@example.com>
 Hi everyone.
 `
 
-//todo: not yet implemented in net/mail
-//once there is support for this, add it
+// todo: not yet implemented in net/mail
+// once there is support for this, add it
 var rfc5322exampleA13 = `From: Pete <pete@silly.example>
 To: A Group:Ed Jones <c@a.test>,joe@where.test,John <jdoe@one.test>;
 Cc: Undisclosed recipients:;
@@ -817,7 +847,7 @@ Message-ID: <testabcd.1234@silly.example>
 Testing.
 `
 
-//we skipped the first message bcause it's the same as A 1.1
+// we skipped the first message bcause it's the same as A 1.1
 var rfc5322exampleA2a = `From: Mary Smith <mary@example.net>
 To: John Doe <jdoe@machine.example>
 Reply-To: "Mary Smith: Personal Account" <smith@home.example>
@@ -939,6 +969,39 @@ Content-Type: application/csv;
 Content-Transfer-Encoding: 7bit
 Content-Disposition: attachment; 
 	filename="unencoded.csv"
+
+
+"Some", "Data", "In", "Csv", "Format"
+"Foo", "Bar", "Baz", "Bum", "Poo"
+
+--f403045f1dcc043a44054c8e6bbf--
+`
+var attchmentContentDispositionNoFilename = `From: =?UTF-8?Q?Peter_Foobar?= <peter.foobar@gmail.com>
+Date: Tue, 2 Apr 2019 11:12:26 +0000
+Message-ID: <CACtgX4kNXE7T5XKSKeH_zEcfUUmf2vXVASxYjaaK9cCn-3zb_g@mail.gmail.com>
+Subject: =?UTF-8?Q?Peter_Foobar?=
+To: dusan@kasan.sk
+Content-Type: multipart/mixed; boundary=f403045f1dcc043a44054c8e6bbf
+
+--f403045f1dcc043a44054c8e6bbf
+Content-Type: multipart/alternative; boundary=f403045f1dcc043a3f054c8e6bbd
+
+--f403045f1dcc043a3f054c8e6bbd
+Content-Type: text/plain; charset=UTF-8
+
+
+
+--f403045f1dcc043a3f054c8e6bbd
+Content-Type: text/html; charset=UTF-8
+
+<div dir="ltr"><br></div>
+
+--f403045f1dcc043a3f054c8e6bbd--
+--f403045f1dcc043a44054c8e6bbf
+Content-Type: application/csv; 
+	name="unencoded.csv"
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment
 
 
 "Some", "Data", "In", "Csv", "Format"
