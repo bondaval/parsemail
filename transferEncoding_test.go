@@ -1,42 +1,78 @@
 package parsemail
 
 import (
+	"encoding/base64"
+	"io"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
-// base64TextEmail mirrors what Outlook produces when a body carries non-ASCII
-// (currency symbols, accented names): the text parts inside multipart/related
-// > multipart/alternative are base64, while the same email in plain ASCII would
-// be quoted-printable.
-const base64TextEmail = `From: Jack <jack@example.com>
-To: submissions@example.com
-Subject: FW: Prospect
-Content-Type: multipart/related; boundary="OUTER"
-MIME-Version: 1.0
+// mime builds a fixture with CRLF line endings, because that is what real mail
+// uses and an LF-only fixture hides trailing-CR bugs.
+func mimeLines(lines ...string) string {
+	return strings.Join(lines, "\r\n") + "\r\n"
+}
 
---OUTER
-Content-Type: multipart/alternative; boundary="INNER"
+// alternativeEmail wraps one text/plain and one text/html part, each with the
+// given transfer encoding and payload, in a multipart/alternative.
+func alternativeEmail(charset, cte, plain, html string) string {
+	return mimeLines(
+		"From: Jack <jack@example.com>",
+		"To: submissions@example.com",
+		"Subject: FW: Prospect",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/alternative; boundary="INNER"`,
+		"",
+		"--INNER",
+		`Content-Type: text/plain; charset="`+charset+`"`,
+		"Content-Transfer-Encoding: "+cte,
+		"",
+		plain,
+		"",
+		"--INNER",
+		`Content-Type: text/html; charset="`+charset+`"`,
+		"Content-Transfer-Encoding: "+cte,
+		"",
+		html,
+		"",
+		"--INNER--",
+	)
+}
 
---INNER
-Content-Type: text/plain; charset="utf-8"
-Content-Transfer-Encoding: base64
+// mixedEmail is the production shape: a body plus a CRQ attachment. It is the
+// one case where a body-handling regression costs an attachment too.
+func mixedEmail(cte, plain string) string {
+	return mimeLines(
+		"From: Jack <jack@example.com>",
+		"To: submissions@example.com",
+		"Subject: FW: Prospect",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/mixed; boundary="B"`,
+		"",
+		"--B",
+		`Content-Type: text/plain; charset="utf-8"`,
+		"Content-Transfer-Encoding: "+cte,
+		"",
+		plain,
+		"",
+		"--B",
+		`Content-Type: text/csv; name="crq.csv"`,
+		`Content-Disposition: attachment; filename="crq.csv"`,
+		"Content-Transfer-Encoding: base64",
+		"",
+		"Y29sMSxjb2wyCjEsMg==",
+		"",
+		"--B--",
+	)
+}
 
-SW5zdXJhYmxlIHNhbGVzIOKCrDYwbSBmb3IgTW9udGHDsWEu
-
---INNER
-Content-Type: text/html; charset="utf-8"
-Content-Transfer-Encoding: base64
-
-PHA+SW5zdXJhYmxlIHNhbGVzIOKCrDYwbTwvcD4=
-
---INNER--
-
---OUTER--
-`
-
-func TestParse_Base64TextParts_AreDecoded(t *testing.T) {
-	email, err := Parse(strings.NewReader(base64TextEmail))
+func TestParse_WhenTextPartsAreBase64_DecodesBothBodies(t *testing.T) {
+	email, err := Parse(strings.NewReader(alternativeEmail(
+		"utf-8", "base64",
+		"SW5zdXJhYmxlIHNhbGVzIOKCrDYwbSBmb3IgTW9udGHDsWEu",
+		"PHA+SW5zdXJhYmxlIHNhbGVzIOKCrDYwbTwvcD4=",
+	)))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -44,36 +80,213 @@ func TestParse_Base64TextParts_AreDecoded(t *testing.T) {
 	if want := "Insurable sales €60m for Montaña."; email.TextBody != want {
 		t.Errorf("TextBody = %q, want %q", email.TextBody, want)
 	}
-
 	if want := "<p>Insurable sales €60m</p>"; email.HTMLBody != want {
 		t.Errorf("HTMLBody = %q, want %q", email.HTMLBody, want)
 	}
 }
 
-// eightBitTextEmail guards the identity encodings: adding the decode step must
-// not reject a part that declares one.
-const eightBitTextEmail = `From: Jack <jack@example.com>
-To: submissions@example.com
-Subject: Plain
-Content-Type: multipart/alternative; boundary="INNER"
-MIME-Version: 1.0
-
---INNER
-Content-Type: text/plain; charset="utf-8"
-Content-Transfer-Encoding: 8bit
-
-Insurable sales.
-
---INNER--
-`
-
-func TestParse_EightBitTextPart_ReadsThrough(t *testing.T) {
-	email, err := Parse(strings.NewReader(eightBitTextEmail))
+// Quoted-printable works only because Go's multipart reader decodes it and
+// drops the header before decodeContent ever sees it. That accident carries
+// almost all ASCII production mail, so it needs pinning explicitly: this also
+// proves the body is decoded exactly once, not twice.
+func TestParse_WhenTextPartsAreQuotedPrintable_DecodesExactlyOnce(t *testing.T) {
+	email, err := Parse(strings.NewReader(alternativeEmail(
+		"utf-8", "quoted-printable",
+		"Cost =E2=82=AC60m for Monta=C3=B1a, wrapped here=",
+		"<p>Cost =E2=82=AC60m</p>",
+	)))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 
-	if want := "Insurable sales."; email.TextBody != want {
+	if want := "Cost €60m for Montaña, wrapped here"; email.TextBody != want {
 		t.Errorf("TextBody = %q, want %q", email.TextBody, want)
 	}
+	if want := "<p>Cost €60m</p>"; email.HTMLBody != want {
+		t.Errorf("HTMLBody = %q, want %q", email.HTMLBody, want)
+	}
+}
+
+func TestParse_WhenBase64TextIsInMultipartMixed_DecodesBodyAndKeepsAttachment(t *testing.T) {
+	email, err := Parse(strings.NewReader(mixedEmail("base64", "SGVsbG8gd29ybGQ=")))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if want := "Hello world"; email.TextBody != want {
+		t.Errorf("TextBody = %q, want %q", email.TextBody, want)
+	}
+	assertSingleCrqAttachment(t, email)
+}
+
+// A body is best-effort: senders mislabel and truncate encodings, and failing
+// the parse would lose the whole email and its attachment, permanently, since
+// callers treat a parse error as unretryable.
+func TestParse_WhenBodyEncodingIsUnusable_DegradesAndKeepsAttachment(t *testing.T) {
+	cases := map[string]struct{ cte, payload, wantBody string }{
+		"base64 with an inner space": {"base64", "SGVsbG8g d29ybGQ=", "SGVsbG8g d29ybGQ="},
+		"base64 missing its padding": {"base64", "SGVsbG8gd29ybGQ", "SGVsbG8gd29ybGQ"},
+		"truncated base64":           {"base64", "SGVsbG8gd29ybG", "SGVsbG8gd29ybG"},
+		"plain text mislabelled":     {"base64", "Hello world", "Hello world"},
+		"unknown encoding":           {"x-uuencode", "Hello world", "Hello world"},
+		"hyphenated 8-bit":           {"8-bit", "Hello world", "Hello world"},
+		"charset in the cte header":  {"utf-8", "Hello world", "Hello world"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			email, err := Parse(strings.NewReader(mixedEmail(c.cte, c.payload)))
+			if err != nil {
+				t.Fatalf("parse should degrade, not fail: %v", err)
+			}
+
+			if email.TextBody != c.wantBody {
+				t.Errorf("TextBody = %q, want %q", email.TextBody, c.wantBody)
+			}
+			assertSingleCrqAttachment(t, email)
+		})
+	}
+}
+
+// Attachments stay strict: handing back corrupt bytes is worse than an error.
+func TestParse_WhenAttachmentEncodingIsUnknown_Fails(t *testing.T) {
+	_, err := Parse(strings.NewReader(mimeLines(
+		"From: Jack <jack@example.com>",
+		"To: submissions@example.com",
+		"Subject: FW: Prospect",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/mixed; boundary="B"`,
+		"",
+		"--B",
+		`Content-Type: text/plain; charset="utf-8"`,
+		"",
+		"Hello world",
+		"",
+		"--B",
+		`Content-Type: text/csv; name="crq.csv"`,
+		`Content-Disposition: attachment; filename="crq.csv"`,
+		"Content-Transfer-Encoding: x-uuencode",
+		"",
+		"whatever",
+		"",
+		"--B--",
+	)))
+
+	if err == nil {
+		t.Fatal("an attachment with an unknown encoding should fail the parse")
+	}
+}
+
+func TestParse_WhenTransferEncodingIsSpeltOddly_StillDecodes(t *testing.T) {
+	for _, cte := range []string{"BASE64", "Base64", " base64 "} {
+		t.Run(cte, func(t *testing.T) {
+			email, err := Parse(strings.NewReader(mixedEmail(cte, "SGVsbG8gd29ybGQ=")))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if want := "Hello world"; email.TextBody != want {
+				t.Errorf("TextBody = %q, want %q", email.TextBody, want)
+			}
+		})
+	}
+
+	for _, cte := range []string{"7BIT", "8bit", "binary"} {
+		t.Run(cte, func(t *testing.T) {
+			email, err := Parse(strings.NewReader(mixedEmail(cte, "Hello world")))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if want := "Hello world"; email.TextBody != want {
+				t.Errorf("TextBody = %q, want %q", email.TextBody, want)
+			}
+		})
+	}
+}
+
+// Base64 is the encoding a mailer picks *because* the body is not ASCII, so a
+// non-UTF-8 charset lands here far more often than anywhere else. Left
+// unconverted it is silent corruption: json coerces the invalid bytes to U+FFFD
+// rather than erroring, so a debtor name reaches the reader as "Monta?a".
+func TestParse_WhenBodyCharsetIsNotUtf8_ConvertsToUtf8(t *testing.T) {
+	// "Montaña costs €60m" in windows-1252: 0xF1 for n-tilde, 0x80 for euro.
+	windows1252 := []byte("Monta\xf1a costs \x8060m")
+	email, err := Parse(strings.NewReader(alternativeEmail(
+		"windows-1252", "base64",
+		base64Of(windows1252), base64Of(windows1252),
+	)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if want := "Montaña costs €60m"; email.TextBody != want {
+		t.Errorf("TextBody = %q, want %q", email.TextBody, want)
+	}
+	if !utf8.ValidString(email.TextBody) {
+		t.Error("TextBody is not valid UTF-8")
+	}
+}
+
+// An unknown charset must degrade rather than fail, and must still never emit
+// invalid UTF-8 downstream.
+func TestParse_WhenBodyCharsetIsUnknown_DegradesToValidUtf8(t *testing.T) {
+	email, err := Parse(strings.NewReader(alternativeEmail(
+		"x-made-up-charset", "base64",
+		base64Of([]byte("Monta\xf1a")), base64Of([]byte("Monta\xf1a")),
+	)))
+	if err != nil {
+		t.Fatalf("parse should degrade, not fail: %v", err)
+	}
+
+	if !utf8.ValidString(email.TextBody) {
+		t.Errorf("TextBody is not valid UTF-8: %q", email.TextBody)
+	}
+}
+
+// decodeContent's quoted-printable branch is unreachable for multipart parts
+// (Go decodes and strips those), so its only live caller is the non-multipart
+// body path.
+func TestParse_WhenNonMultipartBodyIsQuotedPrintable_Decodes(t *testing.T) {
+	email, err := Parse(strings.NewReader(mimeLines(
+		"From: Jack <jack@example.com>",
+		"To: submissions@example.com",
+		"Subject: FW: Prospect",
+		"MIME-Version: 1.0",
+		"Content-Type: application/octet-stream",
+		"Content-Transfer-Encoding: quoted-printable",
+		"",
+		"Cost =E2=82=AC60m",
+	)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	content, err := io.ReadAll(email.Content)
+	if err != nil {
+		t.Fatalf("read content: %v", err)
+	}
+	// Content is the raw body rather than a trimmed text part, so unlike
+	// TextBody it keeps its trailing line break.
+	if want := "Cost €60m\r\n"; string(content) != want {
+		t.Errorf("Content = %q, want %q", string(content), want)
+	}
+}
+
+func assertSingleCrqAttachment(t *testing.T, email Email) {
+	t.Helper()
+
+	if len(email.Attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(email.Attachments))
+	}
+
+	data, err := io.ReadAll(email.Attachments[0].Data)
+	if err != nil {
+		t.Fatalf("read attachment: %v", err)
+	}
+	if want := "col1,col2\n1,2"; string(data) != want {
+		t.Errorf("attachment = %q, want %q", string(data), want)
+	}
+}
+
+func base64Of(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
 }

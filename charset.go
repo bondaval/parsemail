@@ -21,8 +21,18 @@ type charsetDecoder func(input io.Reader) (io.Reader, error)
 
 // charsetDecoderMap to store decoder functions for different charsets
 var charsetDecoderMap = map[string]charsetDecoder{
+	"iso-8859-1": func(input io.Reader) (io.Reader, error) {
+		return transform.NewReader(input, charmap.ISO8859_1.NewDecoder()), nil
+	},
 	"iso-8859-2": func(input io.Reader) (io.Reader, error) {
 		return transform.NewReader(input, charmap.ISO8859_2.NewDecoder()), nil
+	},
+	"iso-8859-15": func(input io.Reader) (io.Reader, error) {
+		return transform.NewReader(input, charmap.ISO8859_15.NewDecoder()), nil
+	},
+	// Outlook's default for western-European mail that is not sent as UTF-8.
+	"windows-1252": func(input io.Reader) (io.Reader, error) {
+		return transform.NewReader(input, charmap.Windows1252.NewDecoder()), nil
 	},
 }
 
