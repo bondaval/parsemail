@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"mime/quotedprintable"
 	"net/mail"
 	"strings"
 	"time"
@@ -117,19 +118,19 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 
 		switch contentType {
 		case contentTypeTextPlain:
-			ppContent, err := io.ReadAll(part)
+			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			textBody += strings.TrimSuffix(string(ppContent[:]), "\n")
+			textBody += strings.TrimSuffix(ppContent, "\n")
 		case contentTypeTextHtml:
-			ppContent, err := io.ReadAll(part)
+			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			htmlBody += strings.TrimSuffix(string(ppContent[:]), "\n")
+			htmlBody += strings.TrimSuffix(ppContent, "\n")
 		case contentTypeMultipartAlternative:
 			tb, hb, ef, err := parseMultipartAlternative(part, params["boundary"])
 			if err != nil {
@@ -174,19 +175,19 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 
 		switch contentType {
 		case contentTypeTextPlain:
-			ppContent, err := io.ReadAll(part)
+			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			textBody += strings.TrimSuffix(string(ppContent[:]), "\n")
+			textBody += strings.TrimSuffix(ppContent, "\n")
 		case contentTypeTextHtml:
-			ppContent, err := io.ReadAll(part)
+			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			htmlBody += strings.TrimSuffix(string(ppContent[:]), "\n")
+			htmlBody += strings.TrimSuffix(ppContent, "\n")
 		case contentTypeMultipartRelated:
 			tb, hb, ef, err := parseMultipartRelated(part, params["boundary"])
 			if err != nil {
@@ -239,19 +240,19 @@ func parseMultipartMixed(msg io.Reader, boundary string) (textBody, htmlBody str
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 		} else if contentType == contentTypeTextPlain {
-			ppContent, err := io.ReadAll(part)
+			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 
-			textBody += strings.TrimSuffix(string(ppContent[:]), "\n")
+			textBody += strings.TrimSuffix(ppContent, "\n")
 		} else if contentType == contentTypeTextHtml {
-			ppContent, err := io.ReadAll(part)
+			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 
-			htmlBody += strings.TrimSuffix(string(ppContent[:]), "\n")
+			htmlBody += strings.TrimSuffix(ppContent, "\n")
 		} else {
 			ok, err := isAttachment(part)
 
@@ -376,8 +377,26 @@ func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
 	return
 }
 
+// readTextPart reads a text/plain or text/html part, decoding its
+// Content-Transfer-Encoding first. Go's multipart reader transparently decodes
+// quoted-printable and drops the header, but leaves base64 parts encoded, so
+// reading one directly yields the base64 text rather than the message.
+func readTextPart(part *multipart.Part) (string, error) {
+	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
+	if err != nil {
+		return "", err
+	}
+
+	content, err := io.ReadAll(decoded)
+	if err != nil {
+		return "", err
+	}
+
+	return string(content), nil
+}
+
 func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
-	switch encoding {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
 		decoded := base64.NewDecoder(base64.StdEncoding, content)
 		b, err := io.ReadAll(decoded)
@@ -386,15 +405,22 @@ func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
 		}
 
 		return bytes.NewReader(b), nil
-	case "7bit":
+	case "quoted-printable":
+		b, err := io.ReadAll(quotedprintable.NewReader(content))
+		if err != nil {
+			return nil, err
+		}
+
+		return bytes.NewReader(b), nil
+	// 8bit and binary are identity encodings; without them a text part that
+	// declares one would now fail where it previously read through undecoded.
+	case "7bit", "8bit", "binary", "":
 		dd, err := io.ReadAll(content)
 		if err != nil {
 			return nil, err
 		}
 
 		return bytes.NewReader(dd), nil
-	case "":
-		return content, nil
 	default:
 		return nil, fmt.Errorf("unknown encoding: %s", encoding)
 	}
