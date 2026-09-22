@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"golang.org/x/text/encoding/htmlindex"
+	"golang.org/x/text/transform"
 )
 
 // mime builds a fixture with CRLF line endings, because that is what real mail
@@ -399,6 +402,85 @@ func TestParse_WhenCharsetIsBeyondTheCommonSet_StillConverts(t *testing.T) {
 			}
 			if !utf8.ValidString(email.TextBody) {
 				t.Error("TextBody is not valid UTF-8")
+			}
+		})
+	}
+}
+
+// Round-tripping through the encoder, rather than hand-written byte fixtures,
+// means the test cannot be wrong about what the bytes should be: it encodes
+// known text into the charset a client would use, then asserts the parser gives
+// the same text back.
+func TestParse_RoundTripsRealWorldCharsets(t *testing.T) {
+	cases := map[string]struct{ charset, text string }{
+		"portuguese":          {"windows-1252", "Construções Almeida, Lda — €60m"},
+		"portuguese latin-1":  {"iso-8859-1", "Comissão de Crédito — cobertura"},
+		"spanish":             {"windows-1252", "Montaña S.A. — límite €5,0M"},
+		"turkish":             {"windows-1254", "Yıldırım Şirketi A.Ş. teminat"},
+		"turkish latin-5":     {"iso-8859-9", "Güneş İhracat ığŞ"},
+		"cyrillic windows":    {"windows-1251", "Компания Пароход, лимит"},
+		"cyrillic koi8-r":     {"koi8-r", "Компания Пароход"},
+		"greek":               {"iso-8859-7", "Ελληνική Εταιρεία"},
+		"polish":              {"windows-1250", "Spółka Łódź Kraków"},
+		"simplified chinese":  {"gb2312", "中文贸易公司"},
+		"traditional chinese": {"big5", "中文貿易公司"},
+		"japanese":            {"shift_jis", "日本商事株式会社"},
+		"hebrew":              {"windows-1255", "חברה בעמ"},
+		"utf-8 everything":    {"utf-8", "Montaña · Yıldırım · 中文 · €60m"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			encoding, err := htmlindex.Get(c.charset)
+			if err != nil {
+				t.Fatalf("htmlindex does not know %q: %v", c.charset, err)
+			}
+
+			encoded, _, err := transform.Bytes(encoding.NewEncoder(), []byte(c.text))
+			if err != nil {
+				t.Fatalf("%q cannot represent this text, pick another fixture: %v", c.charset, err)
+			}
+
+			email, err := Parse(strings.NewReader(alternativeEmail(
+				c.charset, "base64", base64Of(encoded), base64Of(encoded),
+			)))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			if email.TextBody != c.text {
+				t.Errorf("TextBody = %q, want %q", email.TextBody, c.text)
+			}
+			if email.HTMLBody != c.text {
+				t.Errorf("HTMLBody = %q, want %q", email.HTMLBody, c.text)
+			}
+		})
+	}
+}
+
+// Whatever a sender declares, the parser must not panic and must not hand
+// downstream invalid UTF-8. A charset label is attacker-adjacent input: it
+// arrives unvalidated from the outside world.
+func TestParse_WhenCharsetLabelIsHostile_NeverPanicsAndStaysValidUtf8(t *testing.T) {
+	labels := []string{
+		"", " ", "utf-8", "UTF-8", "  windows-1252  ", "x-made-up", "latin-1",
+		"windows1252", "cp-1252", "unknown-8bit", "ks_c_5601-1987", "tis-620",
+		"utf-7", "iso-8859-11", "\x00", "%s%n", strings.Repeat("a", 5000),
+	}
+
+	for _, label := range labels {
+		t.Run(strings.TrimSpace(label), func(t *testing.T) {
+			email, err := Parse(strings.NewReader(alternativeEmail(
+				label, "base64", base64Of([]byte("Monta\xf1a costs \x8060m")), "",
+			)))
+			if err != nil {
+				// Degrading is fine; a malformed Content-Type can legitimately
+				// fail. Panicking or emitting bad UTF-8 is not.
+				return
+			}
+
+			if !utf8.ValidString(email.TextBody) {
+				t.Errorf("label %q produced invalid UTF-8: %q", label, email.TextBody)
 			}
 		})
 	}

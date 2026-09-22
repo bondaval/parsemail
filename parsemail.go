@@ -434,7 +434,7 @@ func decodeTextCharset(content []byte, contentType string) string {
 		}
 	}
 
-	return strings.ToValidUTF8(string(content), "�")
+	return strings.ToValidUTF8(string(content), "\uFFFD")
 }
 
 // trimTrailingNewline drops one trailing line break, CRLF or LF. TrimRight is

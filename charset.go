@@ -30,9 +30,18 @@ func (e charsetError) Error() string {
 func getCharsetDecoder(charset string, input io.Reader) (io.Reader, error) {
 	// htmlindex.Get lower-cases and trims the name itself, so callers need not.
 	encoding, err := htmlindex.Get(charset)
-	// The nil check is unreachable via htmlindex today. It stays because the
-	// cost of being wrong is a panic, not a bad decode.
-	if err != nil || encoding == nil {
+
+	// The label is not one the index knows: a typo, a private x-* name, or a
+	// charset genuinely outside the standard.
+	if err != nil {
+		return nil, charsetError(charset)
+	}
+
+	// The label is known but carries no decoder. Unreachable via htmlindex,
+	// whose table is fully populated - but it is exactly the state ianaindex
+	// returns for gb2312, and NewDecoder on a nil Encoding panics. One line to
+	// make that impossible if the table ever changes.
+	if encoding == nil {
 		return nil, charsetError(charset)
 	}
 
