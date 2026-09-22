@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"time"
 )
@@ -44,12 +45,18 @@ func Parse(r io.Reader) (email Email, err error) {
 		email.TextBody, email.HTMLBody, email.EmbeddedFiles, err = parseMultipartAlternative(msg.Body, params["boundary"])
 	case contentTypeMultipartRelated:
 		email.TextBody, email.HTMLBody, email.EmbeddedFiles, err = parseMultipartRelated(msg.Body, params["boundary"])
+	// A single-part message carries its transfer encoding and charset on the
+	// message header rather than on a part, so it needs the same treatment a
+	// part gets - without it a base64 single-part body comes back as its base64
+	// text, which is the whole bug this file exists to avoid.
 	case contentTypeTextPlain:
-		message, _ := io.ReadAll(msg.Body)
-		email.TextBody = strings.TrimSuffix(string(message[:]), "\n")
+		var body string
+		body, err = readTextBody(msg.Body, textproto.MIMEHeader(msg.Header))
+		email.TextBody = trimTrailingNewline(body)
 	case contentTypeTextHtml:
-		message, _ := io.ReadAll(msg.Body)
-		email.HTMLBody = strings.TrimSuffix(string(message[:]), "\n")
+		var body string
+		body, err = readTextBody(msg.Body, textproto.MIMEHeader(msg.Header))
+		email.HTMLBody = trimTrailingNewline(body)
 	default:
 		email.Content, err = decodeContent(msg.Body, msg.Header.Get("Content-Transfer-Encoding"))
 	}
@@ -123,14 +130,14 @@ func parseMultipartRelated(msg io.Reader, boundary string) (textBody, htmlBody s
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			textBody += strings.TrimSuffix(ppContent, "\n")
+			textBody += trimTrailingNewline(ppContent)
 		case contentTypeTextHtml:
 			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			htmlBody += strings.TrimSuffix(ppContent, "\n")
+			htmlBody += trimTrailingNewline(ppContent)
 		case contentTypeMultipartAlternative:
 			tb, hb, ef, err := parseMultipartAlternative(part, params["boundary"])
 			if err != nil {
@@ -180,14 +187,14 @@ func parseMultipartAlternative(msg io.Reader, boundary string) (textBody, htmlBo
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			textBody += strings.TrimSuffix(ppContent, "\n")
+			textBody += trimTrailingNewline(ppContent)
 		case contentTypeTextHtml:
 			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, embeddedFiles, err
 			}
 
-			htmlBody += strings.TrimSuffix(ppContent, "\n")
+			htmlBody += trimTrailingNewline(ppContent)
 		case contentTypeMultipartRelated:
 			tb, hb, ef, err := parseMultipartRelated(part, params["boundary"])
 			if err != nil {
@@ -245,14 +252,14 @@ func parseMultipartMixed(msg io.Reader, boundary string) (textBody, htmlBody str
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 
-			textBody += strings.TrimSuffix(ppContent, "\n")
+			textBody += trimTrailingNewline(ppContent)
 		} else if contentType == contentTypeTextHtml {
 			ppContent, err := readTextPart(part)
 			if err != nil {
 				return textBody, htmlBody, attachments, embeddedFiles, err
 			}
 
-			htmlBody += strings.TrimSuffix(ppContent, "\n")
+			htmlBody += trimTrailingNewline(ppContent)
 		} else {
 			ok, err := isAttachment(part)
 
@@ -281,8 +288,7 @@ func decodeMimeSentence(s string) string {
 	ss := strings.Split(s, " ")
 
 	for _, word := range ss {
-		dec := new(mime.WordDecoder)
-		w, err := dec.Decode(word)
+		w, err := wordDecoder.Decode(word)
 		if err != nil {
 			if len(result) == 0 {
 				w = word
@@ -377,50 +383,86 @@ func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
 	return
 }
 
-// readTextPart reads a text/plain or text/html part, decoding its
-// Content-Transfer-Encoding first. Go's multipart reader transparently decodes
-// quoted-printable and drops the header, but leaves base64 parts encoded, so
-// reading one directly yields the base64 text rather than the message.
+// readTextPart reads a text/plain or text/html part into a UTF-8 string,
+// undoing its Content-Transfer-Encoding and charset first. Go's multipart
+// reader transparently decodes quoted-printable and drops the header, but
+// leaves base64 parts encoded, so reading one directly yields the base64 text
+// rather than the message.
+//
+// A body is best-effort by design. Senders mislabel and truncate encodings, and
+// failing the read would fail the whole email - taking its attachments with it,
+// and permanently, since callers treat a parse error as unretryable. Junk prose
+// is recoverable; a lost submission is not. Attachments stay strict, because
+// silently handing back corrupt bytes is worse there than an error.
 func readTextPart(part *multipart.Part) (string, error) {
-	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
+	return readTextBody(part, textproto.MIMEHeader(part.Header))
+}
+
+// readTextBody is readTextPart's engine, taking the headers separately so a
+// single-part message can reuse it with the message's own headers.
+func readTextBody(body io.Reader, header textproto.MIMEHeader) (string, error) {
+	raw, err := io.ReadAll(body)
 	if err != nil {
 		return "", err
 	}
 
-	content, err := io.ReadAll(decoded)
+	decoded, err := decodeContentBytes(bytes.NewReader(raw), header.Get("Content-Transfer-Encoding"))
 	if err != nil {
-		return "", err
+		decoded = raw
 	}
 
-	return string(content), nil
+	return decodeTextCharset(decoded, header.Get("Content-Type")), nil
+}
+
+// decodeTextCharset converts a decoded body from the charset its Content-Type
+// declares into UTF-8. An absent, unknown or failing charset degrades to the
+// bytes as they stand, with anything still invalid replaced, so a body is never
+// the reason an email fails and downstream never receives invalid UTF-8.
+func decodeTextCharset(content []byte, contentType string) string {
+	charset := ""
+	if _, params, err := mime.ParseMediaType(contentType); err == nil {
+		charset = strings.ToLower(strings.TrimSpace(params["charset"]))
+	}
+
+	switch charset {
+	case "", "utf-8", "utf8":
+	default:
+		if reader, err := getCharsetDecoder(charset, bytes.NewReader(content)); err == nil {
+			if converted, err := io.ReadAll(reader); err == nil {
+				content = converted
+			}
+		}
+	}
+
+	return strings.ToValidUTF8(string(content), "\uFFFD")
+}
+
+// trimTrailingNewline drops one trailing line break, CRLF or LF. TrimRight is
+// deliberately not used: it would strip every trailing newline and change the
+// bodies the existing fixtures pin.
+func trimTrailingNewline(s string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(s, "\n"), "\r")
 }
 
 func decodeContent(content io.Reader, encoding string) (io.Reader, error) {
+	decoded, err := decodeContentBytes(content, encoding)
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(decoded), nil
+}
+
+func decodeContentBytes(content io.Reader, encoding string) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
-		decoded := base64.NewDecoder(base64.StdEncoding, content)
-		b, err := io.ReadAll(decoded)
-		if err != nil {
-			return nil, err
-		}
-
-		return bytes.NewReader(b), nil
+		return io.ReadAll(base64.NewDecoder(base64.StdEncoding, content))
 	case "quoted-printable":
-		b, err := io.ReadAll(quotedprintable.NewReader(content))
-		if err != nil {
-			return nil, err
-		}
-
-		return bytes.NewReader(b), nil
-	// 8bit and binary are identity encodings; without them a text part that
-	// declares one would now fail where it previously read through undecoded.
+		return io.ReadAll(quotedprintable.NewReader(content))
+	// 8bit and binary are identity encodings; without them a part that declares
+	// one would fail where it previously read through undecoded.
 	case "7bit", "8bit", "binary", "":
-		dd, err := io.ReadAll(content)
-		if err != nil {
-			return nil, err
-		}
-
-		return bytes.NewReader(dd), nil
+		return io.ReadAll(content)
 	default:
 		return nil, fmt.Errorf("unknown encoding: %s", encoding)
 	}
