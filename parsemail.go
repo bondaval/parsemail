@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"time"
 )
@@ -44,12 +45,18 @@ func Parse(r io.Reader) (email Email, err error) {
 		email.TextBody, email.HTMLBody, email.EmbeddedFiles, err = parseMultipartAlternative(msg.Body, params["boundary"])
 	case contentTypeMultipartRelated:
 		email.TextBody, email.HTMLBody, email.EmbeddedFiles, err = parseMultipartRelated(msg.Body, params["boundary"])
+	// A single-part message carries its transfer encoding and charset on the
+	// message header rather than on a part, so it needs the same treatment a
+	// part gets - without it a base64 single-part body comes back as its base64
+	// text, which is the whole bug this file exists to avoid.
 	case contentTypeTextPlain:
-		message, _ := io.ReadAll(msg.Body)
-		email.TextBody = strings.TrimSuffix(string(message[:]), "\n")
+		var body string
+		body, err = readTextBody(msg.Body, textproto.MIMEHeader(msg.Header))
+		email.TextBody = trimTrailingNewline(body)
 	case contentTypeTextHtml:
-		message, _ := io.ReadAll(msg.Body)
-		email.HTMLBody = strings.TrimSuffix(string(message[:]), "\n")
+		var body string
+		body, err = readTextBody(msg.Body, textproto.MIMEHeader(msg.Header))
+		email.HTMLBody = trimTrailingNewline(body)
 	default:
 		email.Content, err = decodeContent(msg.Body, msg.Header.Get("Content-Transfer-Encoding"))
 	}
@@ -281,8 +288,7 @@ func decodeMimeSentence(s string) string {
 	ss := strings.Split(s, " ")
 
 	for _, word := range ss {
-		dec := new(mime.WordDecoder)
-		w, err := dec.Decode(word)
+		w, err := wordDecoder.Decode(word)
 		if err != nil {
 			if len(result) == 0 {
 				w = word
@@ -389,17 +395,23 @@ func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
 // is recoverable; a lost submission is not. Attachments stay strict, because
 // silently handing back corrupt bytes is worse there than an error.
 func readTextPart(part *multipart.Part) (string, error) {
-	raw, err := io.ReadAll(part)
+	return readTextBody(part, textproto.MIMEHeader(part.Header))
+}
+
+// readTextBody is readTextPart's engine, taking the headers separately so a
+// single-part message can reuse it with the message's own headers.
+func readTextBody(body io.Reader, header textproto.MIMEHeader) (string, error) {
+	raw, err := io.ReadAll(body)
 	if err != nil {
 		return "", err
 	}
 
-	decoded, err := decodeContentBytes(bytes.NewReader(raw), part.Header.Get("Content-Transfer-Encoding"))
+	decoded, err := decodeContentBytes(bytes.NewReader(raw), header.Get("Content-Transfer-Encoding"))
 	if err != nil {
 		decoded = raw
 	}
 
-	return decodeTextCharset(decoded, part.Header.Get("Content-Type")), nil
+	return decodeTextCharset(decoded, header.Get("Content-Type")), nil
 }
 
 // decodeTextCharset converts a decoded body from the charset its Content-Type
@@ -413,7 +425,7 @@ func decodeTextCharset(content []byte, contentType string) string {
 	}
 
 	switch charset {
-	case "", "utf-8", "utf8", "us-ascii", "ascii":
+	case "", "utf-8", "utf8":
 	default:
 		if reader, err := getCharsetDecoder(charset, bytes.NewReader(content)); err == nil {
 			if converted, err := io.ReadAll(reader); err == nil {

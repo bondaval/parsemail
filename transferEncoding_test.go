@@ -290,3 +290,116 @@ func assertSingleCrqAttachment(t *testing.T, email Email) {
 func base64Of(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
+
+// A non-UTF-8 charset in an encoded-word header used to fail the entire parse,
+// losing the email and its attachments permanently - the same failure the body
+// path degrades away from, arriving through the header door.
+func TestParse_WhenHeaderCharsetIsNotUtf8_DecodesAndKeepsAttachment(t *testing.T) {
+	email, err := Parse(strings.NewReader(mimeLines(
+		"From: =?windows-1254?Q?Mehmet_Y=FDld=FDr=FDm?= <mehmet@broker.com.tr>",
+		"To: submissions@example.com",
+		"Subject: =?windows-1254?Q?Limit_talebi_-_Y=FDld=FDr=FDm?=",
+		"MIME-Version: 1.0",
+		`Content-Type: multipart/mixed; boundary="B"`,
+		"",
+		"--B",
+		`Content-Type: text/plain; charset="utf-8"`,
+		"",
+		"Hello world",
+		"",
+		"--B",
+		`Content-Type: text/csv; name="crq.csv"`,
+		`Content-Disposition: attachment; filename="crq.csv"`,
+		"Content-Transfer-Encoding: base64",
+		"",
+		"Y29sMSxjb2wyCjEsMg==",
+		"",
+		"--B--",
+	)))
+	if err != nil {
+		t.Fatalf("a non-UTF-8 header charset must not fail the parse: %v", err)
+	}
+
+	if want := "Mehmet Yıldırım"; email.From[0].Name != want {
+		t.Errorf("From.Name = %q, want %q", email.From[0].Name, want)
+	}
+	if want := "Limit talebi - Yıldırım"; email.Subject != want {
+		t.Errorf("Subject = %q, want %q", email.Subject, want)
+	}
+	assertSingleCrqAttachment(t, email)
+}
+
+// A single-part message declares its encoding on the message header rather than
+// on a part. It was skipping transfer-decoding and charset conversion entirely,
+// so a base64 body came back as its base64 text - the original defect, still
+// live on this path.
+func TestParse_WhenSinglePartBodyIsEncoded_DecodesIt(t *testing.T) {
+	cases := map[string]struct{ charset, cte, payload, want string }{
+		"base64 utf-8": {
+			"utf-8", "base64", "SW5zdXJhYmxlIHNhbGVzIOKCrDYwbQ==", "Insurable sales €60m",
+		},
+		"base64 windows-1252": {
+			"windows-1252", "base64", base64Of([]byte("Monta\xf1a costs \x8060m")), "Montaña costs €60m",
+		},
+		"quoted-printable": {
+			"utf-8", "quoted-printable", "Cost =E2=82=AC60m", "Cost €60m",
+		},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			email, err := Parse(strings.NewReader(mimeLines(
+				"From: jack@example.com",
+				"To: submissions@example.com",
+				"Subject: FW: Prospect",
+				"MIME-Version: 1.0",
+				`Content-Type: text/plain; charset="`+c.charset+`"`,
+				"Content-Transfer-Encoding: "+c.cte,
+				"",
+				c.payload,
+			)))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			if email.TextBody != c.want {
+				t.Errorf("TextBody = %q, want %q", email.TextBody, c.want)
+			}
+		})
+	}
+}
+
+// The charset set is as wide as the senders are, so it cannot be enumerated by
+// hand. These are the labels a hand-written map would predictably have missed.
+func TestParse_WhenCharsetIsBeyondTheCommonSet_StillConverts(t *testing.T) {
+	cases := map[string]struct {
+		charset string
+		body    []byte
+		want    string
+	}{
+		"turkish windows-1254":  {"windows-1254", []byte("Y\xfdld\xfdr\xfdm \xde"), "Yıldırım Ş"},
+		"simplified chinese":    {"gb2312", []byte("\xd6\xd0\xce\xc4"), "中文"},
+		"cyrillic koi8-r":       {"koi8-r", []byte("\xd0\xc1\xd2\xcf"), "паро"},
+		"cp1252 alias":          {"cp1252", []byte("\x8060m"), "€60m"},
+		"utf8 without a hyphen": {"utf8", []byte("Montaña"), "Montaña"},
+		"iso8859-1 no hyphen":   {"iso8859-1", []byte("Monta\xf1a"), "Montaña"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			email, err := Parse(strings.NewReader(alternativeEmail(
+				c.charset, "base64", base64Of(c.body), base64Of(c.body),
+			)))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			if email.TextBody != c.want {
+				t.Errorf("TextBody = %q, want %q", email.TextBody, c.want)
+			}
+			if !utf8.ValidString(email.TextBody) {
+				t.Error("TextBody is not valid UTF-8")
+			}
+		})
+	}
+}
