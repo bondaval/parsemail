@@ -10,6 +10,7 @@ import (
 	"mime/quotedprintable"
 	"net/mail"
 	"net/textproto"
+	"path"
 	"strings"
 	"time"
 )
@@ -19,6 +20,9 @@ const contentTypeMultipartAlternative = "multipart/alternative"
 const contentTypeMultipartRelated = "multipart/related"
 const contentTypeTextHtml = "text/html"
 const contentTypeTextPlain = "text/plain"
+const contentTypeMessageRfc822 = "message/rfc822"
+
+const attachedEmailFilename = "attached-email.eml"
 
 // Parse an email message read from io.Reader into parsemail.Email struct
 func Parse(r io.Reader) (email Email, err error) {
@@ -273,6 +277,10 @@ func parseMultipartMixed(msg io.Reader, boundary string) (textBody, htmlBody str
 					return textBody, htmlBody, attachments, embeddedFiles, err
 				}
 
+				if named, _ := getPartFilename(part); named == "" {
+					at.Filename = uniqueFilename(at.Filename, attachments)
+				}
+
 				attachments = append(attachments, at)
 			} else {
 				return textBody, htmlBody, attachments, embeddedFiles, fmt.Errorf("Unknown multipart/mixed nested mime type: %s", contentType)
@@ -353,6 +361,10 @@ func getPartFilename(part *multipart.Part) (string, error) {
 	return attributes["name"], nil
 }
 
+// isAttachment accepts a part with a filename, and also one without: a part
+// marked `Content-Disposition: attachment`, or an attached email
+// (message/rfc822). Outlook sends an attached email with neither a filename nor
+// a name, and rejecting it fails the whole message.
 func isAttachment(part *multipart.Part) (bool, error) {
 	filename, err := getPartFilename(part)
 
@@ -360,7 +372,21 @@ func isAttachment(part *multipart.Part) (bool, error) {
 		return false, err
 	}
 
-	return filename != "", nil
+	if filename != "" {
+		return true, nil
+	}
+
+	return isAttachedEmail(part) || isDispositionAttachment(part), nil
+}
+
+func isAttachedEmail(part *multipart.Part) bool {
+	mediaType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	return err == nil && mediaType == contentTypeMessageRfc822
+}
+
+func isDispositionAttachment(part *multipart.Part) bool {
+	disposition, _, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+	return err == nil && strings.EqualFold(disposition, "attachment")
 }
 
 func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
@@ -370,17 +396,63 @@ func decodeAttachment(part *multipart.Part) (at Attachment, err error) {
 		return
 	}
 
-	filename := decodeMimeSentence(partFilename)
-	decoded, err := decodeContent(part, part.Header.Get("Content-Transfer-Encoding"))
+	decoded, err := decodeContentBytes(part, part.Header.Get("Content-Transfer-Encoding"))
 	if err != nil {
 		return
 	}
 
+	filename := decodeMimeSentence(partFilename)
+	if filename == "" {
+		filename = fallbackFilename(part, decoded)
+	}
+
 	at.Filename = filename
-	at.Data = decoded
+	at.Data = bytes.NewReader(decoded)
 	at.ContentType = strings.Split(part.Header.Get("Content-Type"), ";")[0]
 
 	return
+}
+
+// uniqueFilename numbers a generated name that is already taken in the email,
+// as "Re: Quote (2).eml", so two unnamed attachments never share one. Names
+// the sender gave are left alone, duplicates included.
+func uniqueFilename(name string, attachments []Attachment) string {
+	taken := map[string]bool{}
+	for _, at := range attachments {
+		taken[at.Filename] = true
+	}
+	if !taken[name] {
+		return name
+	}
+
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for n := 2; ; n++ {
+		candidate := fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
+// fallbackFilename names an attachment that arrived without one. An attached
+// email is named after its own subject, as mail clients show it.
+func fallbackFilename(part *multipart.Part, decoded []byte) string {
+	if !isAttachedEmail(part) {
+		return "attachment"
+	}
+
+	attached, err := mail.ReadMessage(bytes.NewReader(decoded))
+	if err != nil {
+		return attachedEmailFilename
+	}
+
+	subject := strings.TrimSpace(decodeMimeSentence(attached.Header.Get("Subject")))
+	if subject == "" {
+		return attachedEmailFilename
+	}
+
+	return subject + ".eml"
 }
 
 // readTextPart reads a text/plain or text/html part into a UTF-8 string,
